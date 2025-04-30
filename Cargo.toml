@@ -1,0 +1,22 @@
+[package]
+name = "solana_client_ext"
+version = "0.1.0"
+edition = "2021"
+authors = ["bergabman bergabman1@gmail.com"]
+description = "Solana rust client extension for efficient transaction optimization"
+license = "MIT OR Apache-2.0" # Or any other license you choose
+keywords = ["solana", "rpc", "client", "transaction", "compute-units", "optimization"]
+categories = ["solana"] # Optional: Category for crates.io browsing
+
+[dependencies]
+solana-client = "2.2.2"
+solana-sdk = { version = "2.2.2", features = ["default"] }
+solana-program-runtime = "2.2.2"
+solana-compute-budget = "2.2.2"
+solana-svm="2.2.2"
+solana-bpf-loader-program = "2.2.2"
+solana-svm-transaction = "2.2.2"
+
+
+[lib]
+path = "src/lib.rs"
