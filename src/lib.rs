@@ -1,43 +1,33 @@
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+
 use error::SolanaClientExtError;
-use solana_client::{rpc_client, rpc_config::RpcSimulateTransactionConfig};
+use solana_client::{rpc_client::RpcClient, rpc_config::RpcSimulateTransactionConfig};
+use solana_compute_budget::compute_budget_limits::ComputeBudgetLimits;
+use solana_program_runtime::loaded_programs::{BlockRelation, ForkGraph, ProgramCacheEntry};
+use solana_sdk::clock::Slot;
+use solana_sdk::compute_budget::ComputeBudgetInstruction;
+use solana_sdk::fee::{FeeDetails, FeeStructure};
+use solana_sdk::hash::Hash;
 use solana_sdk::pubkey::Pubkey;
+use solana_sdk::rent_collector::RentCollector;
+use solana_sdk::signature::Keypair;
+use solana_sdk::transaction;
 use solana_sdk::{
-    account::{feature_set::FeatureSet, fee::FeeStructure, AccountSharedData},
+    account::AccountSharedData,
     message::Message,
     signers::Signers,
     transaction::{SanitizedTransaction as SolanaSanitizedTransaction, Transaction},
-    transaction_context::TransactionContext,
 };
+use agave_feature_set::FeatureSet;
 
 use solana_bpf_loader_program::syscalls::create_program_runtime_environment_v1;
 use solana_compute_budget::compute_budget::ComputeBudget;
-use solana_svm::message_processor::process_message;
-use {
-    solana_bpf_loader_program::syscalls::create_program_runtime_environment_v1,
-    solana_compute_budget::compute_budget_limits::ComputeBudgetLimits,
-    solana_fee_structure::FeeDetails,
-    solana_program_runtime::{
-        execution_budget::SVMTransactionExecutionBudget,
-        loaded_programs::{BlockRelation, ForkGraph, ProgramCacheEntry},
-    },
-    solana_sdk::{clock::Slot, transaction},
-    solana_svm::{
-        account_loader::CheckedTransactionDetails, transaction_processor::TransactionBatchProcessor,
-    },
-    solana_svm_callback::TransactionProcessingCallback,
-    solana_svm_feature_set::SVMFeatureSet,
-    solana_system_program::system_processor,
-    std::sync::{Arc, RwLock},
-};
-
-use {
-    solana_program_runtime::{
-        invoke_context::{self, EnvironmentConfig, InvokeContext},
-        loaded_programs::{sysvar_cache, ProgramCacheForTxBatch, ProgramRuntimeEnvironments},
-    },
-    solana_svm_transaction::svm_message::SVMMessage,
-    solana_timings::{ExecuteDetailsTimings, ExecuteTimings},
-};
+use solana_svm::account_loader::CheckedTransactionDetails;
+use solana_svm::transaction_processing_callback::TransactionProcessingCallback;
+use solana_svm::transaction_processor::{TransactionBatchProcessor, TransactionProcessingConfig, TransactionProcessingEnvironment};
+use solana_svm_callback::InvokeContextCallback;
+use solana_system_program::system_processor;
 mod error;
 
 /// # RpcClientExt
@@ -85,8 +75,8 @@ impl RollUpChannel {
         // would likely be hoisted from the cluster.
         //
         // For example purposes, they are provided as defaults here.
-        let compute_budget = SVMTransactionExecutionBudget::default();
-        let feature_set = SVMFeatureSet::all_enabled();
+        let compute_budget = ComputeBudget::default();
+        let feature_set = FeatureSet::all_enabled();
         let fee_structure = FeeStructure::default();
         let rent_collector = RentCollector::default();
 
@@ -122,6 +112,7 @@ impl RollUpChannel {
             epoch_total_stake: 0,
             feature_set,
             rent_collector: None(),
+            fee_lamports_per_signature: todo!(),
         };
 
         // The PayTube transaction processing config for Solana SVM.
@@ -213,8 +204,8 @@ impl TransactionProcessingCallback for RollUpAccountLoader<'_> {
 /// cache, then adding the System program to the processor's builtins.
 pub(crate) fn create_transaction_batch_processor<CB: TransactionProcessingCallback>(
     callbacks: &CB,
-    feature_set: &SVMFeatureSet,
-    compute_budget: &SVMTransactionExecutionBudget,
+    feature_set: &FeatureSet,
+    compute_budget: &ComputeBudget,
     fork_graph: Arc<RwLock<ForkRollUpGraph>>,
 ) -> TransactionBatchProcessor<ForkRollUpGraph> {
     // Create a new transaction batch processor.
@@ -299,10 +290,6 @@ impl RpcClientExt for solana_client::rpc_client::RpcClient {
 
 
 
-        for key in accounts {
-            let data: AccountSharedData = self.get_account(&key).unwrap().into();
-            accounts_data.push(data);
-        }
         let accounts = transaction.message.account_keys;
         let rollup_c = RollUpChannel::new(accounts, self);
         let used_cu = rollup_c.process_rollup_transfers(&[transaction]);
