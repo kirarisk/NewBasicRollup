@@ -336,7 +336,7 @@ impl RpcClientExt for solana_client::rpc_client::RpcClient {
         let optimal_cu = *optimal_cu_vec.get(0).unwrap() as u32;
 
         let optimize_ix = ComputeBudgetInstruction::set_compute_unit_limit(
-            optimal_cu.saturating_add(optimal_cu.saturating_div(100) * 20),
+            optimal_cu.saturating_add(optimal_cu),
         );
         transaction
             .message
@@ -405,20 +405,21 @@ impl RpcClientExt for solana_client::rpc_client::RpcClient {
 
 #[cfg(test)]
 mod tests {
-    use solana_sdk::{pubkey::Pubkey, signature::Keypair, signer::Signer, system_instruction};
+    use solana_sdk::{pubkey::Pubkey, signature::Keypair, signer::Signer, system_instruction,commitment_config::CommitmentConfig};
+    use std::{thread, time::Duration};
+    use solana_client::rpc_response::Response;
+    
 
     use super::*;
 
     #[test]
     fn cu() {
         let rpc_client = solana_client::rpc_client::RpcClient::new("https://api.devnet.solana.com");
-        let new_keypair = Keypair::new();
-        rpc_client
-            .request_airdrop(&new_keypair.pubkey(), 50000)
-            .unwrap();
+        let new_keypair = Keypair::from_bytes(&[252,148,183,236,100,64,108,105,26,181,229,97,54,43,113,1,253,4,109,80,183,26,222,43,209,246,12,80,15,246,53,149,189,22,176,152,33,128,187,215,121,56,191,187,241,223,7,109,96,88,243,76,92,122,185,245,185,255,80,125,80,157,229,222]).unwrap();
+
         let transfer_ix =
             system_instruction::transfer(&new_keypair.pubkey(), &Pubkey::new_unique(), 10000);
-        let mut msg = Message::new(&[transfer_ix], Some(&new_keypair.pubkey()));
+        let msg = Message::new(&[transfer_ix], Some(&new_keypair.pubkey()));
         let blockhash = rpc_client.get_latest_blockhash().unwrap();
         let mut tx = Transaction::new(&[&new_keypair], msg, blockhash);
         let _optimized_cu = rpc_client
@@ -427,6 +428,8 @@ mod tests {
 
         println!("{_optimized_cu}");
         // let tx = Transaction::new(&[&new_keypair], msg, blockhash);
+        tx.sign(&[new_keypair], blockhash);
+
         let result = rpc_client
             .send_and_confirm_transaction_with_spinner(&tx)
             .unwrap();
