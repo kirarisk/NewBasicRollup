@@ -5,6 +5,7 @@ use error::SolanaClientExtError;
 use solana_client::{rpc_client::RpcClient, rpc_config::RpcSimulateTransactionConfig};
 use solana_compute_budget::compute_budget_limits::ComputeBudgetLimits;
 use solana_program_runtime::loaded_programs::{BlockRelation, ForkGraph, ProgramCacheEntry};
+use solana_sdk::account::ReadableAccount;
 use solana_sdk::clock::Slot;
 use solana_sdk::compute_budget::ComputeBudgetInstruction;
 use solana_sdk::fee::{FeeDetails, FeeStructure};
@@ -26,7 +27,7 @@ use solana_compute_budget::compute_budget::ComputeBudget;
 use solana_svm::account_loader::CheckedTransactionDetails;
 use solana_svm::transaction_processing_callback::TransactionProcessingCallback;
 use solana_svm::transaction_processor::{TransactionBatchProcessor, TransactionProcessingConfig, TransactionProcessingEnvironment};
-use solana_svm_callback::InvokeContextCallback;
+// use solana_svm_callback::InvokeContextCallback;
 use solana_system_program::system_processor;
 mod error;
 
@@ -45,29 +46,28 @@ pub(crate) fn get_transaction_check_results(
     vec![
         transaction::Result::Ok(CheckedTransactionDetails::new(
             None,
-            Ok(compute_budget_limit.get_compute_budget_and_limits(
-                compute_budget_limit.loaded_accounts_bytes,
-                FeeDetails::default()
-            )),
+            5000,
         ));
         len
     ]
 }
 
-pub struct RollUpChannel {
+pub struct RollUpChannel<'a> {
     /// I think you know why this is a bad idea...
-    keys: Vec<Keypair>,
-    rpc_client: RpcClient,
+    keys: Vec<Pubkey>,
+    rpc_client: &'a RpcClient,
 }
 
-impl RollUpChannel {
-    pub fn new(keys: Vec<Keypair>, rpc_client: RpcClient) -> Self {
+impl<'a> RollUpChannel<'a> {
+    pub fn new(keys: Vec<Pubkey>, rpc_client: &'a RpcClient) -> Self {
         Self { keys, rpc_client }
     }
 
     pub fn process_rollup_transfers(&self, transactions: &[Transaction])-> Vec<u64> {
         
-        let sanitized = transactions.iter().map(SolanaSanitizedTransaction::from).collect();
+        let sanitized = transactions.iter().map( |tx|
+            SolanaSanitizedTransaction::from_transaction_for_tests(tx.clone())
+        ).collect::<Vec<SolanaSanitizedTransaction>>();
         // PayTube default configs.
         //
         // These can be configurable for channel customization, including
@@ -76,7 +76,7 @@ impl RollUpChannel {
         //
         // For example purposes, they are provided as defaults here.
         let compute_budget = ComputeBudget::default();
-        let feature_set = FeatureSet::all_enabled();
+        let feature_set = Arc::new(FeatureSet::all_enabled());
         let fee_structure = FeeStructure::default();
         let rent_collector = RentCollector::default();
 
@@ -102,6 +102,7 @@ impl RollUpChannel {
             &compute_budget,
             Arc::clone(&fork_graph),
         );
+        println!("transaction batch processor created ");
 
         // The PayTube transaction processing runtime environment.
         //
@@ -111,14 +112,16 @@ impl RollUpChannel {
             blockhash_lamports_per_signature: fee_structure.lamports_per_signature,
             epoch_total_stake: 0,
             feature_set,
-            rent_collector: None(),
-            fee_lamports_per_signature: todo!(),
+            fee_lamports_per_signature: 5000,
+            rent_collector: None,
         };
 
         // The PayTube transaction processing config for Solana SVM.
         //
         // Extended configurations for even more customization of the SVM API.
         let processing_config = TransactionProcessingConfig::default();
+
+        println!("transaction processing_config created ");
 
         // Step 1: Convert the batch of PayTube transactions into
         // SVM-compatible transactions for processing.
@@ -136,10 +139,12 @@ impl RollUpChannel {
             &processing_environment,
             &processing_config,
         );
+        println!("Executed");
 
         let cu = results.processing_results.iter().map(|transaction_results|{
-            let px = transaction_results.unwrap();
-            px.executed_units();
+            let px = transaction_results.as_ref();
+            println!("{px:?}");
+            px.unwrap().executed_units()
         }).collect();
         cu
 
@@ -179,7 +184,7 @@ impl<'a> RollUpAccountLoader<'a> {
     }
 }
 
-impl InvokeContextCallback for RollUpAccountLoader<'_> {}
+// impl InvokeContextCallback for RollUpAccountLoader<'_> {}
 impl TransactionProcessingCallback for RollUpAccountLoader<'_> {
     fn get_account_shared_data(&self, pubkey: &Pubkey) -> Option<AccountSharedData> {
         if let Some(account) = self.cache.read().unwrap().get(pubkey) {
@@ -259,7 +264,7 @@ pub trait RpcClientExt {
         &self,
         unsigned_transaction: &Transaction,
         signers: &'a I,
-    ) -> Result<u64, Box<dyn std::error::Error + 'static>>;
+    ) -> Result<Vec<u64>, Box<dyn std::error::Error + 'static>>;
 
     fn estimate_compute_units_msg<'a, I: Signers + ?Sized>(
         &self,
@@ -285,16 +290,12 @@ impl RpcClientExt for solana_client::rpc_client::RpcClient {
         &self,
         transaction: &Transaction,
         _signers: &'a I,
-    ) -> Result<u64, Box<dyn std::error::Error + 'static>> {
+    ) -> Result<Vec<u64>, Box<dyn std::error::Error + 'static>> {
         // GET SVM MESSAGE
 
-
-
-        let accounts = transaction.message.account_keys;
+        let accounts = transaction.message.account_keys.clone();
         let rollup_c = RollUpChannel::new(accounts, self);
-        let used_cu = rollup_c.process_rollup_transfers(&[transaction]);
-
-
+        let used_cu = rollup_c.process_rollup_transfers(&[transaction.clone()]);
         Ok(used_cu)
     }
 
@@ -331,10 +332,11 @@ impl RpcClientExt for solana_client::rpc_client::RpcClient {
         transaction: &mut Transaction,
         signers: &'a I,
     ) -> Result<u32, Box<dyn std::error::Error + 'static>> {
-        let optimal_cu =
-            u32::try_from(self.estimate_compute_units_unsigned_tx(transaction, signers)?)?;
+        let optimal_cu_vec = self.estimate_compute_units_unsigned_tx(transaction, signers)?;
+        let optimal_cu = *optimal_cu_vec.get(0).unwrap() as u32;
+
         let optimize_ix = ComputeBudgetInstruction::set_compute_unit_limit(
-            optimal_cu.saturating_add(optimal_cu.saturating_div(100) * 20),
+            optimal_cu.saturating_add(optimal_cu),
         );
         transaction
             .message
@@ -403,20 +405,21 @@ impl RpcClientExt for solana_client::rpc_client::RpcClient {
 
 #[cfg(test)]
 mod tests {
-    use solana_sdk::{pubkey::Pubkey, signature::Keypair, signer::Signer, system_instruction};
+    use solana_sdk::{pubkey::Pubkey, signature::Keypair, signer::Signer, system_instruction,commitment_config::CommitmentConfig};
+    use std::{thread, time::Duration};
+    use solana_client::rpc_response::Response;
+    
 
     use super::*;
 
     #[test]
     fn cu() {
         let rpc_client = solana_client::rpc_client::RpcClient::new("https://api.devnet.solana.com");
-        let new_keypair = Keypair::new();
-        rpc_client
-            .request_airdrop(&new_keypair.pubkey(), 50000)
-            .unwrap();
+        let new_keypair = Keypair::from_bytes(&[252,148,183,236,100,64,108,105,26,181,229,97,54,43,113,1,253,4,109,80,183,26,222,43,209,246,12,80,15,246,53,149,189,22,176,152,33,128,187,215,121,56,191,187,241,223,7,109,96,88,243,76,92,122,185,245,185,255,80,125,80,157,229,222]).unwrap();
+
         let transfer_ix =
             system_instruction::transfer(&new_keypair.pubkey(), &Pubkey::new_unique(), 10000);
-        let mut msg = Message::new(&[transfer_ix], Some(&new_keypair.pubkey()));
+        let msg = Message::new(&[transfer_ix], Some(&new_keypair.pubkey()));
         let blockhash = rpc_client.get_latest_blockhash().unwrap();
         let mut tx = Transaction::new(&[&new_keypair], msg, blockhash);
         let _optimized_cu = rpc_client
@@ -424,7 +427,9 @@ mod tests {
             .unwrap();
 
         println!("{_optimized_cu}");
-        let tx = Transaction::new(&[&new_keypair], msg, blockhash);
+        // let tx = Transaction::new(&[&new_keypair], msg, blockhash);
+        tx.sign(&[new_keypair], blockhash);
+
         let result = rpc_client
             .send_and_confirm_transaction_with_spinner(&tx)
             .unwrap();
